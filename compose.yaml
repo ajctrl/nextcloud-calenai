@@ -1,0 +1,16 @@
+services:
+  app:
+    image: ghcr.io/ajctrl/nextcloud-alpine:35-calenai-1.2.7
+    volumes:
+      - nextcloud:/var/www/html
+  web:
+    image: nginx:stable-alpine
+    depends_on:
+      - app
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - nextcloud:/var/www/html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+volumes:
+  nextcloud:
