@@ -83,11 +83,32 @@ jobs:
             fi
           fi
           docker buildx build --load --platform linux/amd64 --build-arg NEXTCLOUD_IMAGE --build-arg CALENAI_VERSION --build-arg CALENAI_SHA256 -t "$image" .
-          docker compose run --rm --no-deps -e NEXTCLOUD_ADMIN_USER=admin -e NEXTCLOUD_ADMIN_PASSWORD=test-only -e SQLITE_DATABASE=nextcloud app "$SERVER" -t
-          docker compose run --rm --no-deps -u www-data app php occ app:enable calenai
+          # Finish setup after the server starts and wait for the first-use hook.
+          docker compose -p fresh up -d
+          curl -fsS --retry 30 --retry-all-errors --retry-delay 2 http://127.0.0.1:8080/status.php |
+            jq -e '.installed == false'
+          docker compose -p fresh exec -T -u www-data app php occ maintenance:install --database sqlite --admin-user admin --admin-pass test-only
+          for attempt in {1..30}; do
+            if docker compose -p fresh exec -T -u www-data app php occ app:list --output=json | jq -e '.enabled | has("calenai")'; then break; fi
+            if (( attempt == 30 )); then docker compose -p fresh logs app; exit 1; fi
+            sleep 2
+          done
+          docker compose -p fresh down -v
+          # Install upstream Nextcloud first, then migrate its volume to this image.
+          docker compose create app
+          docker run --rm --volumes-from "$(docker compose ps -aq app)" -e NEXTCLOUD_ADMIN_USER=admin -e NEXTCLOUD_ADMIN_PASSWORD=test-only -e SQLITE_DATABASE=nextcloud "$NEXTCLOUD_IMAGE" "$SERVER" -t
+          docker compose run --rm --no-deps app "$SERVER" -t
+          docker compose run --rm --no-deps -u www-data app php occ app:list --output=json | jq -e '.enabled | has("calenai")'
+          docker compose run --rm --no-deps -u www-data app php occ app:disable calenai
           docker compose up -d
           curl -fsS --retry 20 --retry-all-errors --retry-delay 2 http://127.0.0.1:8080/status.php |
             jq -e '.installed == true and .maintenance == false and .needsDbUpgrade == false'
+          docker compose exec -T -u www-data app php occ app:list --output=json | jq -e '.disabled | has("calenai")'
+          # Older images have no initialization record. Preserve their explicit disable.
+          docker compose exec -T -u www-data app php occ config:app:delete core calenai_image_initialized
+          docker compose run --rm --no-deps app "$SERVER" -t
+          docker compose exec -T -u www-data app php occ app:list --output=json | jq -e '.disabled | has("calenai")'
+          docker compose exec -T -u www-data app php occ config:app:get core calenai_image_initialized | grep -Fx yes
           docker push "$image"
       - name: Publish version and rolling aliases
         if: steps.current.outputs.wanted != '[]'

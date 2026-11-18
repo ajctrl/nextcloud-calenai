@@ -47,3 +47,43 @@ if [ "$installed" = true ]; then
         php occ upgrade --no-interaction
     fi
 fi
+
+enable_on_first_use() {
+    initialized=$(php occ config:app:get core calenai_image_initialized --default-value no) || return 1
+    [ "$initialized" != yes ] || return 0
+
+    # An existing enabled setting records the administrator's choice, including "no".
+    enabled=$(php occ config:app:get calenai enabled --default-value unset) || return 1
+    if [ "$enabled" = unset ]; then
+        # Remember intent if app:enable fails after setting enabled=no.
+        php occ config:app:set core calenai_image_initialized --value=pending || return 1
+        php occ app:enable calenai || return 1
+    elif [ "$initialized" = pending ] && [ "$enabled" = no ]; then
+        php occ app:enable calenai || return 1
+    fi
+    php occ config:app:set core calenai_image_initialized --value=yes
+}
+
+if [ "$installed" = true ]; then
+    enable_on_first_use
+else
+    # Web setup runs after the server starts.
+    (
+        exec 9<&-
+        delay=3
+        while :; do
+            sleep "$delay"
+            [ -f config/config.php ] || continue
+            if php occ status --output=json | php -r '
+                $status = json_decode(stream_get_contents(STDIN), true);
+                exit(empty($status["installed"]) || !empty($status["maintenance"]) ? 1 : 0);
+            '; then
+                if (flock 9 && enable_on_first_use) 9<apps; then
+                    break
+                fi
+                echo "CalenAI initialization failed; retrying in 30 seconds." >&2
+                delay=30
+            fi
+        done
+    ) </dev/null &
+fi

@@ -26,11 +26,9 @@ docker compose up -d
 
 FPM Alpine または Debian FPM の場合は、それぞれ `<メジャー>-fpm-alpine` または `<メジャー>-fpm` を選びます。どちらも Nginx と一緒に起動します。Apache を使う場合は `<メジャー>-apache` を選び、同じ `.env` に `COMPOSE_FILE=compose.apache.yaml` を追加します。Apache 版は単体で HTTP を提供します。
 
-http://localhost:8080 を開き、管理者アカウントを作成します。ローカルで試す場合は SQLite を選べます。セットアップ後、CalenAI を有効にします。
+http://localhost:8080 を開き、管理者アカウントを作成します。ローカルで試す場合は SQLite を選べます。新規セットアップが完了すると CalenAI が自動で有効になります。
 
-```sh
-docker compose exec -u www-data app php occ app:enable calenai
-```
+他のイメージでセットアップ済みの環境でも、既存ボリュームを使ってこのイメージを初めて起動すると、CalenAI の有効状態が未設定の場合に自動で有効になります。移行前や旧版で管理者が明示的に無効にした場合、またはグループ限定で有効にした場合は、その設定を引き継ぎます。初回処理の完了は Nextcloud のデータベースに記録されるため、その後に管理者が無効にした場合は再起動やイメージ更新後も無効のままです。
 
 管理設定の「AI」でプロバイダーを設定し、ユーザーが書き込めるカレンダーを用意してください。データと設定は Docker の名前付きボリュームに保存されます。
 
