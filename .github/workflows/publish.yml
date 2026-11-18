@@ -4,7 +4,6 @@ on:
     - cron: '17 * * * *'
   push:
     branches: [main]
-    tags: ['35-calenai-*']
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,32 +12,28 @@ defaults:
   run:
     shell: bash
 concurrency:
+  # Keep the same group as runs started before support expanded beyond 35.
   group: publish-nextcloud-35
   cancel-in-progress: false
 jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -B .github/scripts/test-plan-images.py
   releases:
+    needs: tests
     runs-on: ubuntu-latest
     outputs:
       jobs: ${{ steps.find.outputs.jobs }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
       - name: Identify missing builds and tags
         id: find
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --paginate --slurp 'repos/ajctrl/CalenAI/releases?per_page=100' > releases.json
-          if ! command -v skopeo >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y skopeo
-          fi
-          export REGISTRY_AUTH_FILE="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
-          python3 .github/scripts/plan-images.py releases.json >> "$GITHUB_OUTPUT"
+          python3 .github/scripts/plan-images.py >> "$GITHUB_OUTPUT"
   publish:
     needs: releases
     if: needs.releases.outputs.jobs != '[]'
@@ -52,6 +47,10 @@ jobs:
       IMAGE_TAG: ${{ matrix.revision }}
       SERVER: ${{ matrix.base == 'apache' && 'apache2-foreground' || 'php-fpm' }}
       NEXTCLOUD_VARIANT: ${{ matrix.base }}
+      NEXTCLOUD_MAJOR: ${{ matrix.major }}
+      NEXTCLOUD_IMAGE: ${{ matrix.source }}
+      CALENAI_SHA256: ${{ matrix.checksum }}
+      GH_TOKEN: ${{ github.token }}
       CALENAI_VERSION: ${{ matrix.version }}
     steps:
       - uses: actions/checkout@v4
@@ -61,27 +60,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
+      - name: Confirm revision is current on retry
+        id: current
+        if: github.run_attempt != '1'
+        run: |
+          latest_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [[ "$latest_commit" != "$GITHUB_SHA" ]]; then
+            echo "wanted=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          wanted=$(python3 .github/scripts/plan-images.py --check "$NEXTCLOUD_MAJOR" "$NEXTCLOUD_VARIANT" "$IMAGE_TAG")
+          echo "wanted=$wanted" >> "$GITHUB_OUTPUT"
       - name: Build, test and publish revision
-        if: matrix.build
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: matrix.build && steps.current.outputs.wanted != '[]'
         run: |
           image=$(docker compose config --images app)
-          # A failed promotion can be retried after another run has published the revision.
           if (( GITHUB_RUN_ATTEMPT > 1 )); then
-            if docker manifest inspect "$image" >/dev/null 2>manifest-error; then
-              echo "Reusing published revision $image"
-              exit 0
-            fi
+            if docker manifest inspect "$image" >/dev/null 2>manifest-error; then exit 0; fi
             if ! grep -Eiq 'manifest unknown|name unknown|no such manifest' manifest-error; then
               cat manifest-error >&2
               exit 1
             fi
           fi
-          asset="calenai-$CALENAI_VERSION.tar.gz"
-          digest=$(gh api "repos/ajctrl/CalenAI/releases/tags/v$CALENAI_VERSION" |
-            jq -er --arg asset "$asset" '.assets[] | select(.name == $asset and .state == "uploaded") | .digest | select(test("^sha256:[a-f0-9]{64}$"))')
-          docker buildx build --load --build-arg NEXTCLOUD_VARIANT --build-arg CALENAI_VERSION --build-arg "CALENAI_SHA256=${digest#sha256:}" -t "$image" .
+          docker buildx build --load --platform linux/amd64 --build-arg NEXTCLOUD_IMAGE --build-arg CALENAI_VERSION --build-arg CALENAI_SHA256 -t "$image" .
           docker compose run --rm --no-deps -e NEXTCLOUD_ADMIN_USER=admin -e NEXTCLOUD_ADMIN_PASSWORD=test-only -e SQLITE_DATABASE=nextcloud app "$SERVER" -t
           docker compose run --rm --no-deps -u www-data app php occ app:enable calenai
           docker compose up -d
@@ -89,19 +90,23 @@ jobs:
             jq -e '.installed == true and .maintenance == false and .needsDbUpgrade == false'
           docker push "$image"
       - name: Publish version and rolling aliases
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ALIASES: ${{ toJSON(matrix.aliases) }}
+        if: steps.current.outputs.wanted != '[]'
         run: |
+          wanted=$(python3 .github/scripts/plan-images.py --check "$NEXTCLOUD_MAJOR" "$NEXTCLOUD_VARIANT" "$IMAGE_TAG")
+          if [[ "$wanted" == "[]" ]]; then exit 0; fi
           image=$(docker compose config --images app)
-          gh api --paginate --slurp 'repos/ajctrl/CalenAI/releases?per_page=100' > releases.json
-          latest=$(python3 .github/scripts/plan-images.py releases.json --latest)
           tags=()
           while read -r alias; do
-            if [[ "$alias" != 35-calenai-* && "$CALENAI_VERSION" != "$latest" ]]; then
-              continue
-            fi
             tags+=(-t "${image%:*}:$alias")
-          done < <(jq -r '.[]' <<< "$ALIASES")
-          if (( ${#tags[@]} == 0 )); then exit 0; fi
+          done < <(jq -r '.[]' <<< "$wanted")
           docker buildx imagetools create --prefer-index=false "${tags[@]}" "$image"
+  cleanup:
+    needs: [tests, publish]
+    if: ${{ !cancelled() && needs.tests.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove package versions belonging exclusively to EOL majors
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/plan-images.py --cleanup

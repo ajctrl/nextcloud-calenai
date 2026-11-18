@@ -1,5 +1,7 @@
 ARG NEXTCLOUD_VARIANT=fpm-alpine
-FROM nextcloud:35-${NEXTCLOUD_VARIANT}
+ARG NEXTCLOUD_MAJOR=35
+ARG NEXTCLOUD_IMAGE=nextcloud:${NEXTCLOUD_MAJOR}-${NEXTCLOUD_VARIANT}
+FROM ${NEXTCLOUD_IMAGE}
 LABEL org.opencontainers.image.source="https://github.com/ajctrl/nextcloud-calenai"
 
 ARG CALENAI_VERSION=1.2.7
