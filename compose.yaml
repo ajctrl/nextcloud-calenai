@@ -1,6 +1,6 @@
 services:
   app:
-    image: ghcr.io/ajctrl/nextcloud-alpine:35-calenai-1.2.7
+    image: ghcr.io/ajctrl/nextcloud-calenai:${IMAGE_TAG:-35-fpm-alpine}
     volumes:
       - nextcloud:/var/www/html
   web:

@@ -1,0 +1,9 @@
+services:
+  app:
+    image: ghcr.io/ajctrl/nextcloud-calenai:${IMAGE_TAG:-35}
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - nextcloud:/var/www/html
+volumes:
+  nextcloud:
